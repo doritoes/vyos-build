@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (C) 2022-2024 VyOS maintainers and contributors
+# Copyright VyOS maintainers and contributors <maintainers@vyos.io>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 or later as
@@ -17,7 +17,6 @@
 # File: build-vyos-image
 # Purpose: builds VyOS images using a fork of Debian's live-build tool
 
-# Import Python's standard library modules
 import re
 import os
 import sys
@@ -31,10 +30,10 @@ import argparse
 import datetime
 import functools
 import string
+import subprocess
 
 class ImageBuildError(Exception):
     pass
-
 
 # argparse converts hyphens to underscores,
 # so for lookups in the original options hash we have to convert them back
@@ -141,6 +140,8 @@ def build():
 
     from utils import cmd, rc_cmd
     from utils import directories
+    from utils import activation_hint
+    from utils import activation_init
 
     ## Check if there are missing build dependencies
     deps = {
@@ -491,6 +492,13 @@ DOCUMENTATION_URL="{build_config['documentation_url']}"
         with open(os.path.join(binary_includes_dir, 'version.json'), 'w') as f:
             json.dump(version_data, f)
 
+        # For initialization of activation scripts, we need to know if we
+        # are building with create_raw_image
+        if build_config["image_format"] != ["iso"]:
+            raw_build_hint = os.path.join(vyos_data_dir, os.path.basename(activation_hint))
+            with open(raw_build_hint, 'w') as f:
+                pass
+
         # For backwards compatibility with 'add system image' script from older versions
         # we need a file in the old format so that script can find out the version of the image
         # for upgrade
@@ -629,6 +637,16 @@ DOCUMENTATION_URL="{build_config['documentation_url']}"
             with open(file_path, 'w') as f:
                 f.write(build_config["default_config"])
 
+        ## Allow override of which activation scripts are enabled at boot
+        if has_nonempty_key(build_config, "activation_init"):
+            file_path = os.path.join(
+                chroot_includes_dir,
+                activation_init.lstrip(os.sep)
+            )
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w') as f:
+                f.write(build_config["activation_init"])
+
         ## Configure live-build
         lb_config_tmpl = jinja2.Template("""
         lb config noauto \
@@ -703,10 +721,33 @@ Pin-Priority: 600
         cmd("lb build 2>&1")
 
         # Copy the image
-        shutil.copy("live-image-{0}.hybrid.iso".format(build_config["architecture"]), iso_file)
+        shutil.copy(f'live-image-{build_config["architecture"]}.hybrid.iso', iso_file)
 
         # Add the image to the manifest
         manifest['artifacts'].append(iso_file)
+
+        # Now create SBOM
+        syft_target_dir = 'chroot'
+        syft_base_path = os.getcwd() + f'/{syft_target_dir}'
+        base_filename = iso_file.rstrip('.iso')
+        syft_cmd = [['syft', syft_target_dir,
+                     '--source-name', 'VyOS', '--source-version', version,
+                     '-o', f'cyclonedx-json={base_filename}.cdx.json',
+                     '-o', f'spdx-json={base_filename}.spdx.json']]
+
+        # syft bug for CycloneDX https://github.com/anchore/syft/issues/4592#issuecomment-4567247328
+        syft_cmd.append(['sed', '-i', '-e', f's@{syft_base_path}@@g', f'{base_filename}.cdx.json'])
+        syft_cmd.append(['sed', '-i', '-e', f's@{syft_base_path}@//@g', f'{base_filename}.spdx.json'])
+
+        for c in syft_cmd:
+            with subprocess.Popen(c, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, bufsize=1) as p:
+                for line in p.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                p.wait()
+        print("I: Finished SBOM generation")
+
 
     # If the flavor has `image_format = "iso"`, then the work is done.
     # If not, build additional flavors from the ISO.
