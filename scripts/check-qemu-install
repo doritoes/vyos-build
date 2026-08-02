@@ -599,11 +599,19 @@ def BOOTLOADERchooseSerialConsole(child, live: bool) -> None:
         time.sleep(BOOTLOADER_SLEEP)
         child.send(KEY_RETURN)
         time.sleep(BOOTLOADER_SLEEP)
+        # GRUB submenus never time out on their own, so confirm we actually
+        # landed on this submenu before navigating further - otherwise a
+        # dropped keypress leaves the VM stuck here until the login wait
+        # elsewhere expires
+        child.expect('Select console type', timeout=BOOTLOADER_TMO)
+
         # Select console type
         child.send(KEY_DOWN)
         time.sleep(BOOTLOADER_SLEEP)
         child.send(KEY_RETURN)
         time.sleep(BOOTLOADER_SLEEP)
+        child.expect(r'ttyS \(serial\)', timeout=BOOTLOADER_TMO)
+
         # *ttyS (serial)
         child.send(KEY_DOWN)
         time.sleep(BOOTLOADER_SLEEP)
@@ -723,6 +731,7 @@ def _image_update_cli_sequence(c, log, new_image_name, server_bind_host='127.0.0
             'Would you like to set the new image as the default one for boot',
             'An active configuration was found. Would you like to copy it to the new image',
             'Would you like to copy SSH host keys',
+            'Would you like to copy Bash history',
             'Would you like to save the SSH known hosts (fingerprints)',
             'Signature is not available. Do you want to continue with installation',
             'There are unsaved changes to the configuration',
@@ -747,9 +756,11 @@ def _image_update_cli_sequence(c, log, new_image_name, server_bind_host='127.0.0
             c.sendline('y')
         elif i == 7:
             c.sendline('y')
-        elif i == 8 or i == 9:
+        elif i == 8:
+            c.sendline('y')
+        elif i == 9 or i == 10:
             raise Exception('add system image reported an error')
-        elif i == 10:
+        elif i == 11:
             log.info('add system image completed')
             break
 
@@ -1356,18 +1367,17 @@ try:
             log.info('Smoketests will be run using vyconfd/vyos-commitd')
 
         log.info('Executing VyOS smoketests')
+        c.sendline('ls /usr/bin/vyos-smoketest 2>/dev/null')
+        c.expect('/usr/bin/vyos-smoketest')
+        c.expect(op_mode_prompt)
         c.sendline('/usr/bin/vyos-smoketest')
         i = c.expect(['\n +Invalid command:', '\n +Set failed',
-                      'No such file or directory', r'\n\S+@\S+[$#]'], timeout=test_timeout)
+                      r'\n\S+@\S+[$#]'], timeout=test_timeout)
 
         if i == 0:
             raise Exception('Invalid command detected')
         if i == 1:
             raise Exception('Set syntax failed :/')
-        if i == 2:
-            tmp = '(W)hy (T)he (F)ace? VyOS smoketest not found!'
-            log.error(tmp)
-            raise Exception(tmp)
 
         c.sendline('echo EXITCODE:$\x16?')
         i = c.expect(['EXITCODE:0', 'EXITCODE:\d+'])

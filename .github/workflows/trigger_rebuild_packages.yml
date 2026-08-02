@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      REF: main  # Used for curl to trigger build package
+      REF: production  # Used for curl to trigger build package
 
     steps:
       - name: Checkout
@@ -47,6 +47,8 @@ jobs:
               - 'scripts/package-build/hostap/**'
             hsflowd:
               - 'scripts/package-build/hsflowd/**'
+            iproute2:
+              - 'scripts/package-build/iproute2/**'
             isc-dhcp:
               - 'scripts/package-build/isc-dhcp/**'
             isc-kea:
@@ -70,6 +72,8 @@ jobs:
               - 'scripts/package-build/netfilter/**'
             node_exporter:
               - 'scripts/package-build/node_exporter/**'
+            openssl:
+              - 'scripts/package-build/openssl/**'
             openvpn-otp:
               - 'scripts/package-build/openvpn-otp/**'
             owamp:
@@ -82,6 +86,10 @@ jobs:
               - 'scripts/package-build/pyhumps/**'
             radvd:
               - 'scripts/package-build/radvd/**'
+            shim-signed:
+              - 'scripts/package-build/shim-signed/**'
+            squid:
+              - 'scripts/package-build/squid/**'
             strongswan:
               - 'scripts/package-build/strongswan/**'
             tacacs:
@@ -167,6 +175,10 @@ jobs:
             trigger_build "hsflowd"
           fi
 
+          if [ "${{ steps.changes.outputs.iproute2 }}" == "true" ]; then
+            trigger_build "iproute2"
+          fi
+
           if [ "${{ steps.changes.outputs.isc-dhcp }}" == "true" ]; then
             trigger_build "isc-dhcp"
           fi
@@ -211,6 +223,10 @@ jobs:
             trigger_build "node_exporter"
           fi
 
+          if [ "${{ steps.changes.outputs.openssl }}" == "true" ]; then
+            trigger_build "openssl"
+          fi
+
           if [ "${{ steps.changes.outputs.openvpn-otp }}" == "true" ]; then
             trigger_build "openvpn-otp"
           fi
@@ -233,6 +249,14 @@ jobs:
 
           if [ "${{ steps.changes.outputs.radvd }}" == "true" ]; then
             trigger_build "radvd"
+          fi
+
+          if [ "${{ steps.changes.outputs.shim-signed }}" == "true" ]; then
+            trigger_build "shim-signed"
+          fi
+
+          if [ "${{ steps.changes.outputs.squid }}" == "true" ]; then
+            trigger_build "squid"
           fi
 
           if [ "${{ steps.changes.outputs.strongswan }}" == "true" ]; then
