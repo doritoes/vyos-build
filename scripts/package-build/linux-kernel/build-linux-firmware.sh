@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 # All selected drivers are then precomfiled "make drivers/foo/bar.i" and we grep for
 # the magic word "UNIQUE_ID_firmware" which identifies firmware files.
@@ -6,6 +7,7 @@
 CWD=$(pwd)
 LINUX_FIRMWARE="linux-firmware"
 KERNEL_VAR_FILE=${CWD}/kernel-vars
+. ${CWD}/common.sh
 
 . ${KERNEL_VAR_FILE}
 
@@ -20,12 +22,15 @@ if [ ! -d ${LINUX_FIRMWARE} ]; then
 fi
 
 # Retrieve firmware blobs from source files
-FW_FILES=$(find ${KERNEL_DIR}/debian/linux-image-${KERNEL_VERSION}${KERNEL_SUFFIX}/lib/modules/${KERNEL_VERSION}${KERNEL_SUFFIX}/kernel/drivers/net -name *.ko | xargs modinfo | grep "^firmware:" | awk '{print $2}')
+FW_FILES=$(find ${KERNEL_DIR}/debian/linux-image-${KERNEL_VERSION}${KERNEL_SUFFIX}/lib/modules/${KERNEL_VERSION}${KERNEL_SUFFIX}/kernel/drivers/net -name *.ko* | xargs modinfo | grep "^firmware:" | awk '{print $2}')
 
 # Debian package will use the descriptive Git commit as version
 GIT_COMMIT=$(cd ${CWD}/${LINUX_FIRMWARE}; git describe --always)
 VYOS_FIRMWARE_NAME="vyos-linux-firmware"
-VYOS_FIRMWARE_DIR="${VYOS_FIRMWARE_NAME}_${GIT_COMMIT}-0_all"
+# The firmware blobs are selected from the modules of the kernel built on this
+# host, so the package content differs per architecture - build it arch-dependent.
+BUILD_ARCH=$(dpkg --print-architecture)
+VYOS_FIRMWARE_DIR="${VYOS_FIRMWARE_NAME}_${GIT_COMMIT}-0_${BUILD_ARCH}"
 if [ -d ${VYOS_FIRMWARE_DIR} ]; then
     # remove Debian package folder and deb file from previous runs
     rm -rf ${VYOS_FIRMWARE_DIR}*
@@ -87,10 +92,67 @@ done
 
 echo "I: Create linux-firmware package"
 rm -f ${VYOS_FIRMWARE_NAME}_*.deb
-fpm --input-type dir --output-type deb --name ${VYOS_FIRMWARE_NAME} \
-    --maintainer "VyOS Package Maintainers <maintainers@vyos.net>" \
-    --description "Binary firmware for various drivers in the Linux kernel" \
-    --architecture all --version ${GIT_COMMIT} --deb-compression gz -C ${VYOS_FIRMWARE_DIR}
+
+PACKAGE_VERSION=$(debian_version "${GIT_COMMIT}")
+
+cd ${VYOS_FIRMWARE_DIR}
+
+debmake -n -y -p ${VYOS_FIRMWARE_NAME} -u ${PACKAGE_VERSION} \
+    -e maintainers@vyos.net -f "VyOS Package Maintainers"
+
+cat << EOF > debian/control
+Source: ${VYOS_FIRMWARE_NAME}
+Section: kernel
+Priority: optional
+Maintainer: VyOS Package Maintainers <maintainers@vyos.net>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.5.1
+Rules-Requires-Root: no
+
+Package: ${VYOS_FIRMWARE_NAME}
+Architecture: any
+Depends: \${misc:Depends}
+Description: Binary firmware for various drivers in the Linux kernel
+ Firmware blobs assembled from linux-firmware.git for the drivers built
+ into the VyOS kernel.
+EOF
+
+cat << EOF > debian/rules
+#!/usr/bin/make -f
+PACKAGE_BUILD_DIR := debian/${VYOS_FIRMWARE_NAME}
+
+%:
+	dh \$@
+
+override_dh_auto_build:
+	@true
+
+override_dh_auto_install:
+	mkdir -p \${PACKAGE_BUILD_DIR}
+	cp -a lib \${PACKAGE_BUILD_DIR}/
+
+# Firmware blobs must be shipped verbatim. Some of them are valid ELF objects,
+# so the binary mangling helpers - which only run for arch-dependent packages -
+# would happily strip them or try to resolve library dependencies on them.
+override_dh_strip:
+	@true
+
+override_dh_dwz:
+	@true
+
+override_dh_strip_nondeterminism:
+	@true
+
+override_dh_shlibdeps:
+	@true
+
+override_dh_makeshlibs:
+	@true
+EOF
+
+debuild
+
+cd ${CWD}
 
 rm -rf "${LINUX_FIRMWARE_BUILD_DIR}"
 rm -rf ${VYOS_FIRMWARE_DIR}
