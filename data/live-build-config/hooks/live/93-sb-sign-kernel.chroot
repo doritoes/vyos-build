@@ -1,8 +1,22 @@
 #!/bin/sh
+
 SIGN_FILE=$(find /usr/lib -name sign-file)
-KERNEL_KEY="/var/lib/shim-signed/mok/vyos-dev-2025-linux.key"
-KERNEL_CERT="/var/lib/shim-signed/mok/vyos-dev-2025-linux.pem"
+CA_YEAR="$(date +%Y)"
+KERNEL_KEY="/var/lib/shim-signed/mok/vyos-dev-${CA_YEAR}-linux.key"
+KERNEL_CERT="/var/lib/shim-signed/mok/vyos-dev-${CA_YEAR}-linux.pem"
+SB_KERNEL_CERT="/var/lib/shim-signed/mok/vyos-prod-2025-linux.pem"
+SB_OPENSSL_CONF="/etc/ssl/yubihsm-openssl.cnf"
+SB_PKCS11_CONF="/etc/yubihsm_pkcs11.conf"
+PKCS11_KEY_OBJECT="vyos-sb-signer-2025"
 VMLINUZ=$(readlink /boot/vmlinuz)
+
+# Abort HSM signing: drop the partially signed Kernel and the HSM configuration
+hsm_sign_failed() {
+    echo "E: $1"
+    rm -f /boot/${VMLINUZ}.tmp
+    rm -f ${SB_PKCS11_CONF} ${SB_OPENSSL_CONF}
+    exit 1
+}
 
 # All Linux Kernel modules need to be cryptographically signed
 find /lib/modules -type f -name \*.ko | while read MODULE; do
@@ -13,19 +27,66 @@ find /lib/modules -type f -name \*.ko | while read MODULE; do
     fi
 done
 
-if [ ! -f ${KERNEL_KEY} ] && [ ! -f ${KERNEL_CERT} ]; then
-    echo "I: Signing key for Linux Kernel not found - Secure Boot not possible"
-else
-    echo "I: Signing Linux Kernel for Secure Boot"
-    sbsign --key ${KERNEL_KEY} --cert ${KERNEL_CERT} /boot/${VMLINUZ} --output /boot/${VMLINUZ}
-    sbverify --list /boot/${VMLINUZ}
-    rm -f ${KERNEL_KEY}
-fi
+if [ -f ${SB_KERNEL_CERT} ] && [ -f ${SB_OPENSSL_CONF} ]; then
+    echo "I: Signing Linux Kernel for Secure Boot using the HSM"
 
-for cert in $(ls /var/lib/shim-signed/mok/); do
-    if grep -rq "BEGIN PRIVATE KEY" /var/lib/shim-signed/mok/${cert}; then
-        echo "Found private key - bailing out"
+    export OPENSSL_CONF="${SB_OPENSSL_CONF}"
+    export YUBIHSM_PKCS11_CONF="${SB_PKCS11_CONF}"
+
+    sbsign --engine pkcs11 \
+        --key "pkcs11:object=${PKCS11_KEY_OBJECT};type=private" \
+        --cert ${SB_KERNEL_CERT} \
+        /boot/${VMLINUZ} --output /boot/${VMLINUZ}.tmp
+    if [ $? -ne 0 ]; then
+        hsm_sign_failed "Signing of Linux Kernel failed"
+    fi
+
+    sbverify --cert ${SB_KERNEL_CERT} /boot/${VMLINUZ}.tmp
+    if [ $? -ne 0 ]; then
+        hsm_sign_failed "Signature verification failed - keeping the unsigned Linux Kernel"
+    fi
+
+    mv /boot/${VMLINUZ}.tmp /boot/${VMLINUZ}
+    echo "I: Linux Kernel signed and signature verified"
+elif [ -f ${KERNEL_KEY} ] && [ -f ${KERNEL_CERT} ]; then
+    echo "I: Signing Linux Kernel for Secure Boot"
+    sbsign --key ${KERNEL_KEY} --cert ${KERNEL_CERT} \
+        /boot/${VMLINUZ} --output /boot/${VMLINUZ}.tmp
+    if [ $? -ne 0 ]; then
+        rm -f /boot/${VMLINUZ}.tmp ${KERNEL_KEY}
+        echo "E: Signing of Linux Kernel failed"
         exit 1
     fi
+
+    sbverify --cert ${KERNEL_CERT} /boot/${VMLINUZ}.tmp
+    if [ $? -ne 0 ]; then
+        rm -f /boot/${VMLINUZ}.tmp ${KERNEL_KEY}
+        echo "E: Signature verification failed - keeping the unsigned Linux Kernel"
+        exit 1
+    fi
+
+    mv /boot/${VMLINUZ}.tmp /boot/${VMLINUZ}
+    rm -f ${KERNEL_KEY}
+    echo "I: Linux Kernel signed and signature verified"
+else
+    echo "I: Signing key for Linux Kernel not found - Secure Boot not possible"
+fi
+
+for conf in ${SB_PKCS11_CONF} ${SB_OPENSSL_CONF}; do
+    if [ -f ${conf} ]; then
+        echo "I: Removing ${conf}"
+        rm -f ${conf}
+    fi
 done
+
+echo "I: Removing Secure Boot signing tooling"
+apt-get -y purge libengine-pkcs11-openssl yubihsm-pkcs11 libyubihsm2 opensc opensc-pkcs11 libyubihsm-http2 p11-kit-modules
+
+# Fail if any private key found in the image chroot path
+KEY_FILES=$(find /var/lib/shim-signed/mok/ -type f \
+    -exec grep -lE -e '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----' {} + 2>/dev/null)
+if [ -n "${KEY_FILES}" ]; then
+    echo "Found private key - bailing out: ${KEY_FILES}"
+    exit 1
+fi
 
